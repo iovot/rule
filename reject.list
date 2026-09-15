@@ -1,5 +1,7 @@
+.gvt2.com
 .ad.intl.xiaomi.com
 .ad.xiaomi.com
+.criteo.com
 .usp1.baidu.com
 .plugin.mobopay.baidu.com
 .ads.heytapmobi.com
@@ -22,6 +24,7 @@
 .api.newsfeed.intl.miui.com
 .adv.sec.intl.miui.com
 .abtest.mistat.xiaomi.com
+.applovin.com
 .e.qq.com
 .mobads.baidu.com
 .pos.baidu.com
@@ -53,8 +56,11 @@
 .loggw-exsdk.alipay.com
 .log.tpns.gz2.tencent.com
 .trace.zhiyan.tencent-cloud.net
+.google-analytics.com
 .tpstelemetry.tencent.com
 .data.hicloud.com
+.app-measurement.com
+.clarity.ms
 .hubble.netease.com
 .h2tcbox.baidu.com
 .snowflake.qq.com
@@ -156,6 +162,7 @@
 .clientlogdep.music.163.com
 .clientlog3.music.163.com
 .vcs.zijieapi.com
+.app-analytics-services.com
 .yun-hl.3g.qq.com
 .up-hl.3g.qq.com
 .cgicol.amap.com
@@ -258,3 +265,4 @@
 .jun01.oss-cn-beijing.aliyuncs.com
 .shaquevip.oss-cn-zhangjiakou.aliyuncs.com
 .wzjs1.oss-accelerate.aliyuncs.com
+.doubleclick.net
