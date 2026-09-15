@@ -1,24 +1,29 @@
+import re
 from bisect import bisect_right
 from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from ipaddress import IPv4Address
 from os import environ
 from pathlib import Path
-import re
+from tempfile import NamedTemporaryFile
 from threading import local
+from time import sleep
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 
 LOCATIONS = ("CN", "HK")
-LIST_FILES = (Path("apple.list"), Path("openai.list"))
 RANKING_LIMIT = 100
 HISTORY_LIMIT = 100
 WORKERS = 16
 
-DIRECT_FILE = Path("direct.list")
-PROXY_FILE = Path("proxy.list")
-REJECT_FILE = Path("reject.list")
+BASE_DIR = Path(__file__).resolve().parent
+LIST_FILES = (BASE_DIR / "apple.list", BASE_DIR / "openai.list")
+DIRECT_FILE = BASE_DIR / "direct.list"
+PROXY_FILE = BASE_DIR / "proxy.list"
+REJECT_FILE = BASE_DIR / "reject.list"
 
 RADAR_URL = "https://api.cloudflare.com/client/v4/radar/ranking/top"
 DOH_URL = "https://cloudflare-dns.com/dns-query"
@@ -31,6 +36,7 @@ DOMAIN_PATTERN = re.compile(
     r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 )
+FILTER_PATTERN = re.compile(r"\|\|([^\^]+)\^\|?(?:\$([^\s]+))?")
 
 A = 1
 NS = 2
@@ -44,6 +50,12 @@ _cn_starts = ()
 def fetch(url, *, headers=None, params=None):
     if not hasattr(_thread, "session"):
         _thread.session = requests.Session()
+        _thread.session.mount("https://", HTTPAdapter(max_retries=Retry(
+            total=3,
+            backoff_factor=0.5,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET"}),
+        )))
 
     response = _thread.session.get(
         url,
@@ -56,7 +68,20 @@ def fetch(url, *, headers=None, params=None):
 
 
 def normalize_dns_name(domain):
-    return domain.lower().rstrip(".")
+    return domain.strip().lower().rstrip(".")
+
+
+def is_domain(domain):
+    return len(domain) <= 253 and DOMAIN_PATTERN.fullmatch(domain) is not None
+
+
+def domain_suffixes(domain):
+    """Yield the domain and its parents at label boundaries only."""
+    while domain:
+        yield domain
+        _, separator, domain = domain.partition(".")
+        if not separator:
+            break
 
 
 def fetch_top_domains(location):
@@ -70,10 +95,16 @@ def fetch_top_domains(location):
         },
     ).json()
 
-    return [
-        item["domain"].lower()
+    if data.get("success") is not True:
+        raise RuntimeError(f"Radar ranking request failed for {location}")
+
+    domains = [
+        normalize_dns_name(item["domain"])
         for item in data["result"]["top_0"]
     ]
+    if not domains or not all(is_domain(domain) for domain in domains):
+        raise ValueError(f"Radar returned empty or invalid domains for {location}")
+    return domains
 
 
 def load_cn_ranges():
@@ -84,17 +115,29 @@ def load_cn_ranges():
     for record in fetch(APNIC_URL).text.splitlines():
         fields = record.split("|")
 
-        if (
-            fields[:3] == ["apnic", "CN", "ipv4"]
-            and fields[6] in ("allocated", "assigned")
-        ):
+        if fields[:3] == ["apnic", "CN", "ipv4"]:
+            if len(fields) < 7:
+                raise ValueError("Truncated APNIC IPv4 record")
+            if fields[6] not in ("allocated", "assigned"):
+                continue
             start = int(IPv4Address(fields[3]))
-            ranges.append((
-                start,
-                start + int(fields[4]) - 1,
-            ))
+            count = int(fields[4])
+            end = start + count - 1
+            if count <= 0 or end > 0xFFFFFFFF:
+                raise ValueError("Invalid APNIC IPv4 range")
+            ranges.append((start, end))
 
-    _cn_ranges = tuple(sorted(ranges))
+    if not ranges:
+        raise ValueError("APNIC returned no allocated CN IPv4 ranges")
+
+    # A binary search by start is safe only after overlaps are merged.
+    merged = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    _cn_ranges = tuple(merged)
     _cn_starts = tuple(
         start
         for start, _ in _cn_ranges
@@ -114,14 +157,22 @@ def locate_ip(ip):
 
 @cache
 def query_dns(domain, record_type):
-    return fetch(
-        DOH_URL,
-        headers=DOH_HEADERS,
-        params={
-            "name": domain,
-            "type": record_type,
-        },
-    ).json()
+    for attempt in range(3):
+        data = fetch(
+            DOH_URL,
+            headers=DOH_HEADERS,
+            params={"name": domain, "type": record_type},
+        ).json()
+        status = data.get("Status")
+        # NOERROR and NXDOMAIN are valid answers; SERVFAIL is not "OTHER".
+        if status in (0, 3) and not data.get("TC", False):
+            return data
+        if status != 2 or attempt == 2:
+            raise RuntimeError(
+                f"DNS query failed for {domain} ({record_type}): "
+                f"Status={status}, TC={data.get('TC', False)}"
+            )
+        sleep(0.5 * (2 ** attempt))
 
 
 @cache
@@ -229,25 +280,50 @@ def classify_domain(domain):
 
 def load_list_domains():
     return {
-        domain.strip().lower().removeprefix(".")
+        domain.removeprefix(".")
         for path in LIST_FILES
-        for domain in path.read_text(
-            encoding="utf-8"
-        ).splitlines()
-        if domain.strip()
+        for domain in read_list(path)
     }
 
 
 def load_filter_domains():
-    # Ordered keys preserve AdGuard's first occurrence and keep fast membership tests.
+    return parse_filter_domains(fetch(FILTER_URL).text)
+
+
+def parse_filter_domains(text):
+    """Extract concrete ||domain^ rules, not a general AdGuard rule engine.
+
+    Preserve the existing whole-domain scope. Wildcards, regexes, exceptions,
+    unanchored patterns and conditional modifiers cannot be flattened safely.
+    A badfilter disables only the corresponding rule, including its modifiers.
+    """
+    rules = []
+    disabled = set()
+    for line in text.splitlines():
+        match = FILTER_PATTERN.fullmatch(line.strip())
+        if match is None:
+            continue
+        domain = normalize_dns_name(match[1])
+        modifiers = frozenset(match[2].split(",") if match[2] else ())
+        if not is_domain(domain) or modifiers - {"important", "badfilter"}:
+            continue
+        key = (domain, modifiers - {"badfilter"})
+        if "badfilter" in modifiers:
+            disabled.add(key)
+        else:
+            rules.append(key)
+
+    if not rules:
+        raise ValueError("AdGuard returned no supported blocking rules")
+    # Dict keys give source order, deduplication and O(1) membership tests.
     return dict.fromkeys(
-        rule[2:rule.index("^")].lower()
-        for rule in fetch(FILTER_URL).text.splitlines()
-        if rule.startswith("||") and "^" in rule
+        domain for domain, flags in rules
+        if (domain, flags) not in disabled
     )
 
 
-def build_reject_list(direct, proxy, filter_domains):
+def build_reject_list(direct, raw_proxy, filter_domains):
+    """Match final direct suffixes and this run's unfiltered OTHER domains."""
     def domains(lines):
         return {
             normalize_dns_name(line.strip().removeprefix("."))
@@ -256,7 +332,7 @@ def build_reject_list(direct, proxy, filter_domains):
         }
 
     direct_domains = domains(direct) - {"cn"}
-    proxy_domains = domains(proxy)
+    proxy_domains = domains(raw_proxy)
     reject = []
 
     for domain in filter_domains:
@@ -264,22 +340,13 @@ def build_reject_list(direct, proxy, filter_domains):
         if (
             domain == "cn"
             or domain.endswith(".cn")
-            or len(domain) > 253
-            or DOMAIN_PATTERN.fullmatch(domain) is None
+            or not is_domain(domain)
         ):
             continue
 
-        matched = domain in proxy_domains
-        candidate = domain
-        while not matched:
-            if candidate in direct_domains:
-                matched = True
-                break
-            _, separator, candidate = candidate.partition(".")
-            if not separator:
-                break
-
-        if matched:
+        if domain in proxy_domains or any(
+            suffix in direct_domains for suffix in domain_suffixes(domain)
+        ):
             reject.append(f".{domain}")
 
     return reject
@@ -318,25 +385,51 @@ def build_lists(
     return results, direct, proxy
 
 
-def write_lines(path, lines):
-    path.write_text(
-        "\n".join((*lines, "")),
-        encoding="utf-8",
-    )
+def write_outputs(outputs):
+    """Prepare every file first, then replace each destination atomically."""
+    temporary = []
+    try:
+        for path, lines in outputs.items():
+            with NamedTemporaryFile(
+                mode="w", encoding="utf-8", newline="\n",
+                dir=path.parent, prefix=f".{path.name}.", delete=False,
+            ) as handle:
+                temp_path = Path(handle.name)
+                temporary.append((temp_path, path))
+                handle.writelines(f"{line}\n" for line in lines)
+            temp_path.chmod(0o644)
+        for temp_path, path in temporary:
+            temp_path.replace(path)
+    finally:
+        for temp_path, _ in temporary:
+            temp_path.unlink(missing_ok=True)
 
 
-def update_history(
+def read_list(path, *, missing_ok=False):
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        if missing_ok:
+            return []
+        raise
+    lines = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", "!")):
+            continue
+        domain = normalize_dns_name(line.removeprefix("."))
+        if domain != "cn" and not is_domain(domain):
+            raise ValueError(f"Invalid domain in {path.name}: {line!r}")
+        lines.append(f".{domain}")
+    return lines
+
+
+def merge_history(
     path,
     current,
     pinned=(),
 ):
-    previous = (
-        line
-        for line in path.read_text(
-            encoding="utf-8"
-        ).splitlines()
-        if line
-    )
+    previous = read_list(path, missing_ok=True)
 
     lines = list(dict.fromkeys((
         *pinned,
@@ -344,11 +437,16 @@ def update_history(
         *previous,
     )))[:HISTORY_LIMIT]
 
-    write_lines(path, lines)
     return lines
 
 
 def main():
+    if not environ.get("CF_RADAR_TOKEN", "").strip():
+        raise RuntimeError("CF_RADAR_TOKEN is required")
+    list_domains = load_list_domains()
+    # Do not reuse previous DNS answers if main() is invoked again in-process.
+    for cached in (query_dns, get_addresses, get_nameservers):
+        cached.cache_clear()
     with ThreadPoolExecutor(
         max_workers=WORKERS
     ) as executor:
@@ -374,6 +472,7 @@ def main():
         ))
 
         ranges_future.result()
+        filter_domains = filter_future.result()
 
         scans = list(
             executor.map(
@@ -381,26 +480,27 @@ def main():
                 domains,
             )
         )
-        filter_domains = filter_future.result()
 
+    # Capture candidates before LIST/FILTER exclusion and HISTORY_LIMIT truncation.
+    # Only this run's OTHER domains participate in proxy exact matching.
+    raw_proxy = [domain for domain, location, _ in scans if location == "OTHER"]
     results, direct, proxy = build_lists(
         scans,
-        load_list_domains(),
+        list_domains,
         filter_domains,
     )
 
-    direct = update_history(
+    direct = merge_history(
         DIRECT_FILE,
         direct,
         (".cn",),
     )
-    proxy = update_history(
+    proxy = merge_history(
         PROXY_FILE,
         proxy,
     )
-    reject = build_reject_list(direct, proxy, filter_domains)
-    # Rebuild from this run only; never merge with the previous reject.list.
-    write_lines(REJECT_FILE, reject)
+    reject = build_reject_list(direct, raw_proxy, filter_domains)
+    write_outputs({DIRECT_FILE: direct, PROXY_FILE: proxy, REJECT_FILE: reject})
 
     paths = []
 
