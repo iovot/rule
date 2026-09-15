@@ -186,37 +186,22 @@ def get_addresses(domain):
 
 @cache
 def get_nameservers(domain):
-    labels = domain.rstrip(".").split(".")
-
-    for index in range(len(labels) - 1):
-        data = query_dns(
-            ".".join(labels[index:]),
-            "NS",
-        )
+    for candidate in domain_suffixes(domain):
+        if "." not in candidate:
+            break
+        data = query_dns(candidate, "NS")
         nameservers = set()
         zone = None
-
-        for record in data.get("Answer", []):
-            if record["type"] == NS:
-                nameservers.add(
-                    normalize_dns_name(record["data"])
-                )
-                zone = (
-                    zone
-                    or normalize_dns_name(record["name"])
-                )
-
-        for record in data.get("Authority", []):
-            if record["type"] == SOA:
-                nameservers.add(
-                    normalize_dns_name(
-                        record["data"].split()[0]
-                    )
-                )
-                zone = (
-                    zone
-                    or normalize_dns_name(record["name"])
-                )
+        # Keep the existing precedence: Answer NS first, then Authority SOA.
+        for section, record_type in (("Answer", NS), ("Authority", SOA)):
+            for record in data.get(section, []):
+                if record["type"] != record_type:
+                    continue
+                server = record["data"]
+                if record_type == SOA:
+                    server = server.split()[0]
+                nameservers.add(normalize_dns_name(server))
+                zone = zone or normalize_dns_name(record["name"])
 
         if nameservers:
             return zone, tuple(sorted(nameservers))
@@ -224,19 +209,12 @@ def get_nameservers(domain):
     return None, ()
 
 
-def trace_domain(
-    domain,
-    label,
-    indent,
-    visited,
-):
+def trace_domain(domain, label, indent, visited):
     lines = [f"{indent}{label}"]
 
     for ip in get_addresses(domain):
         location = locate_ip(ip)
-        lines.append(
-            f"{indent}  A {ip} {location}"
-        )
+        lines.append(f"{indent}  A {ip} {location}")
 
         if location == "CN":
             return True, lines
@@ -264,26 +242,8 @@ def trace_domain(
 
 
 def classify_domain(domain):
-    found, lines = trace_domain(
-        domain,
-        domain,
-        "",
-        set(),
-    )
-
-    return (
-        domain,
-        "CN" if found else "OTHER",
-        lines,
-    )
-
-
-def load_list_domains():
-    return {
-        domain.removeprefix(".")
-        for path in LIST_FILES
-        for domain in read_list(path)
-    }
+    found, lines = trace_domain(domain, domain, "", set())
+    return domain, "CN" if found else "OTHER", lines
 
 
 def load_filter_domains():
@@ -322,41 +282,19 @@ def parse_filter_domains(text):
     )
 
 
-def build_reject_list(direct, raw_proxy, filter_domains):
-    """Match final direct suffixes and this run's unfiltered OTHER domains."""
-    def domains(lines):
-        return {
-            normalize_dns_name(line.strip().removeprefix("."))
-            for line in lines
-            if line.strip()
-        }
-
-    direct_domains = domains(direct) - {"cn"}
-    proxy_domains = domains(raw_proxy)
-    reject = []
-
-    for domain in filter_domains:
-        # Only concrete domains are suitable for a domain-suffix list.
-        if (
-            domain == "cn"
-            or domain.endswith(".cn")
-            or not is_domain(domain)
-        ):
-            continue
-
-        if domain in proxy_domains or any(
+def build_reject_list(direct, filter_domains):
+    """Expand the final direct list using AdGuard's ordered, unique domains."""
+    direct_domains = set(direct) - {"cn"}
+    return [
+        domain for domain in filter_domains
+        if not domain.endswith(".cn")
+        and any(
             suffix in direct_domains for suffix in domain_suffixes(domain)
-        ):
-            reject.append(f".{domain}")
-
-    return reject
+        )
+    ]
 
 
-def build_lists(
-    scans,
-    list_domains,
-    filter_domains,
-):
+def build_lists(scans, list_domains, filter_domains):
     results = []
     direct = []
     proxy = []
@@ -370,17 +308,11 @@ def build_lists(
         if domain in filter_domains:
             fields.append("FILTER")
 
-        results.append(
-            f"{domain}:{','.join(fields)}"
-        )
+        results.append(f"{domain}:{','.join(fields)}")
 
         if len(fields) == 1:
-            target = (
-                direct
-                if location == "CN"
-                else proxy
-            )
-            target.append(f".{domain}")
+            target = direct if location == "CN" else proxy
+            target.append(domain)
 
     return results, direct, proxy
 
@@ -396,7 +328,8 @@ def write_outputs(outputs):
             ) as handle:
                 temp_path = Path(handle.name)
                 temporary.append((temp_path, path))
-                handle.writelines(f"{line}\n" for line in lines)
+                # Internally every list uses bare domains; format only at output.
+                handle.writelines(f".{domain}\n" for domain in lines)
             temp_path.chmod(0o644)
         for temp_path, path in temporary:
             temp_path.replace(path)
@@ -405,7 +338,7 @@ def write_outputs(outputs):
             temp_path.unlink(missing_ok=True)
 
 
-def read_list(path, *, missing_ok=False):
+def read_domains(path, *, missing_ok=False):
     try:
         text = path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
@@ -420,100 +353,20 @@ def read_list(path, *, missing_ok=False):
         domain = normalize_dns_name(line.removeprefix("."))
         if domain != "cn" and not is_domain(domain):
             raise ValueError(f"Invalid domain in {path.name}: {line!r}")
-        lines.append(f".{domain}")
+        lines.append(domain)
     return lines
 
 
-def merge_history(
-    path,
-    current,
-    pinned=(),
-):
-    previous = read_list(path, missing_ok=True)
-
-    lines = list(dict.fromkeys((
-        *pinned,
-        *current,
-        *previous,
-    )))[:HISTORY_LIMIT]
-
-    return lines
+def merge_history(current, previous, pinned=()):
+    return list(dict.fromkeys((*pinned, *current, *previous)))[:HISTORY_LIMIT]
 
 
-def main():
-    if not environ.get("CF_RADAR_TOKEN", "").strip():
-        raise RuntimeError("CF_RADAR_TOKEN is required")
-    list_domains = load_list_domains()
-    # Do not reuse previous DNS answers if main() is invoked again in-process.
-    for cached in (query_dns, get_addresses, get_nameservers):
-        cached.cache_clear()
-    with ThreadPoolExecutor(
-        max_workers=WORKERS
-    ) as executor:
-        ranges_future = executor.submit(
-            load_cn_ranges
-        )
-        filter_future = executor.submit(
-            load_filter_domains
-        )
-
-        ranked = executor.map(
-            fetch_top_domains,
-            LOCATIONS,
-        )
-
-        domains = list(dict.fromkeys(
-            domain
-            for group in ranked
-            for domain in group
-            if not domain.endswith(
-                EXCLUDED_SUFFIXES
-            )
-        ))
-
-        ranges_future.result()
-        filter_domains = filter_future.result()
-
-        scans = list(
-            executor.map(
-                classify_domain,
-                domains,
-            )
-        )
-
-    # Capture candidates before LIST/FILTER exclusion and HISTORY_LIMIT truncation.
-    # Only this run's OTHER domains participate in proxy exact matching.
-    raw_proxy = [domain for domain, location, _ in scans if location == "OTHER"]
-    results, direct, proxy = build_lists(
-        scans,
-        list_domains,
-        filter_domains,
-    )
-
-    direct = merge_history(
-        DIRECT_FILE,
-        direct,
-        (".cn",),
-    )
-    proxy = merge_history(
-        PROXY_FILE,
-        proxy,
-    )
-    reject = build_reject_list(direct, raw_proxy, filter_domains)
-    write_outputs({DIRECT_FILE: direct, PROXY_FILE: proxy, REJECT_FILE: reject})
-
-    paths = []
-
-    for _, _, lines in scans:
-        paths.extend((*lines, ""))
-
-    paths_output = "\n".join(paths).rstrip()
+def print_report(scans, results, direct, proxy, reject):
+    paths_output = "\n".join(
+        line for _, _, lines in scans for line in (*lines, "")
+    ).rstrip()
     results_output = "\n".join(results)
-    cn_count = sum(
-        location == "CN"
-        for _, location, _ in scans
-    )
-
+    cn_count = sum(location == "CN" for _, location, _ in scans)
     print(
         f"DNS paths:\n{paths_output}\n\n"
         f"Domain results:\n{results_output}\n\n"
@@ -524,6 +377,38 @@ def main():
         f"{len(proxy)} proxy rules, "
         f"{len(reject)} reject rules."
     )
+
+
+def main():
+    if not environ.get("CF_RADAR_TOKEN", "").strip():
+        raise RuntimeError("CF_RADAR_TOKEN is required")
+    list_domains = {domain for path in LIST_FILES for domain in read_domains(path)}
+    previous_direct = read_domains(DIRECT_FILE, missing_ok=True)
+    previous_proxy = read_domains(PROXY_FILE, missing_ok=True)
+    # Do not reuse previous DNS answers if main() is invoked again in-process.
+    for cached in (query_dns, get_addresses, get_nameservers):
+        cached.cache_clear()
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        ranges_future = executor.submit(load_cn_ranges)
+        filter_future = executor.submit(load_filter_domains)
+        domains = list(dict.fromkeys(
+            domain
+            for group in executor.map(fetch_top_domains, LOCATIONS)
+            for domain in group
+            if not domain.endswith(EXCLUDED_SUFFIXES)
+        ))
+
+        ranges_future.result()
+        filter_domains = filter_future.result()
+
+        scans = list(executor.map(classify_domain, domains))
+
+    results, direct, proxy = build_lists(scans, list_domains, filter_domains)
+    direct = merge_history(direct, previous_direct, ("cn",))
+    proxy = merge_history(proxy, previous_proxy)
+    reject = build_reject_list(direct, filter_domains)
+    write_outputs({DIRECT_FILE: direct, PROXY_FILE: proxy, REJECT_FILE: reject})
+    print_report(scans, results, direct, proxy, reject)
 
 
 if __name__ == "__main__":
