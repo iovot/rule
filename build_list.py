@@ -4,6 +4,7 @@ from functools import cache
 from ipaddress import IPv4Address
 from os import environ
 from pathlib import Path
+import re
 from threading import local
 
 import requests
@@ -17,15 +18,19 @@ WORKERS = 16
 
 DIRECT_FILE = Path("direct.list")
 PROXY_FILE = Path("proxy.list")
+REJECT_FILE = Path("reject.list")
 
 RADAR_URL = "https://api.cloudflare.com/client/v4/radar/ranking/top"
 DOH_URL = "https://cloudflare-dns.com/dns-query"
 APNIC_URL = "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest"
 FILTER_URL = "https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt"
 
-RADAR_HEADERS = {"Authorization": f"Bearer {environ['CF_RADAR_TOKEN']}"}
 DOH_HEADERS = {"Accept": "application/dns-json"}
 EXCLUDED_SUFFIXES = tuple(f".{location.lower()}" for location in LOCATIONS)
+DOMAIN_PATTERN = re.compile(
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+)
 
 A = 1
 NS = 2
@@ -57,7 +62,7 @@ def normalize_dns_name(domain):
 def fetch_top_domains(location):
     data = fetch(
         RADAR_URL,
-        headers=RADAR_HEADERS,
+        headers={"Authorization": f"Bearer {environ['CF_RADAR_TOKEN']}"},
         params={
             "location": location,
             "limit": RANKING_LIMIT,
@@ -234,11 +239,50 @@ def load_list_domains():
 
 
 def load_filter_domains():
-    return {
+    # Ordered keys preserve AdGuard's first occurrence and keep fast membership tests.
+    return dict.fromkeys(
         rule[2:rule.index("^")].lower()
         for rule in fetch(FILTER_URL).text.splitlines()
         if rule.startswith("||") and "^" in rule
-    }
+    )
+
+
+def build_reject_list(direct, proxy, filter_domains):
+    def domains(lines):
+        return {
+            normalize_dns_name(line.strip().removeprefix("."))
+            for line in lines
+            if line.strip()
+        }
+
+    direct_domains = domains(direct) - {"cn"}
+    proxy_domains = domains(proxy)
+    reject = []
+
+    for domain in filter_domains:
+        # Only concrete domains are suitable for a domain-suffix list.
+        if (
+            domain == "cn"
+            or domain.endswith(".cn")
+            or len(domain) > 253
+            or DOMAIN_PATTERN.fullmatch(domain) is None
+        ):
+            continue
+
+        matched = domain in proxy_domains
+        candidate = domain
+        while not matched:
+            if candidate in direct_domains:
+                matched = True
+                break
+            _, separator, candidate = candidate.partition(".")
+            if not separator:
+                break
+
+        if matched:
+            reject.append(f".{domain}")
+
+    return reject
 
 
 def build_lists(
@@ -354,6 +398,9 @@ def main():
         PROXY_FILE,
         proxy,
     )
+    reject = build_reject_list(direct, proxy, filter_domains)
+    # Rebuild from this run only; never merge with the previous reject.list.
+    write_lines(REJECT_FILE, reject)
 
     paths = []
 
@@ -374,7 +421,8 @@ def main():
         f"{cn_count} CN, "
         f"{len(results) - cn_count} OTHER; "
         f"{len(direct)} direct rules, "
-        f"{len(proxy)} proxy rules."
+        f"{len(proxy)} proxy rules, "
+        f"{len(reject)} reject rules."
     )
 
 
