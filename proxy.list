@@ -11,10 +11,11 @@
 .office.com
 .cloudflare.com
 .lencr.org
-.live.com
 .cloudflare-dns.com
-.facebook.com
 .digicert.com
+.live.com
+.facebook.com
+.dns.google
 .amazonaws.com
 .whatsapp.net
 .googlevideo.com
@@ -32,7 +33,6 @@
 .msn.com
 .github.com
 .office.net
-.dns.google
 .cdninstagram.com
 .skype.com
 .ytimg.com
