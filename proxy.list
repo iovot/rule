@@ -1,8 +1,8 @@
 .microsoft.com
 .googleapis.com
 .google.com
-.gstatic.com
 .akadns.net
+.gstatic.com
 .aaplimg.com
 .akamaiedge.net
 .ntp.org
@@ -11,11 +11,10 @@
 .office.com
 .cloudflare.com
 .lencr.org
-.cloudflare-dns.com
 .digicert.com
 .live.com
 .facebook.com
-.dns.google
+.cloudflare-dns.com
 .amazonaws.com
 .whatsapp.net
 .instagram.com
@@ -37,6 +36,7 @@
 .gvt1.com
 .amazon.com
 .trafficmanager.net
+.dns.google
 .windows.com
 .windowsupdate.com
 .cdninstagram.com
