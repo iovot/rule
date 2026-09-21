@@ -5,15 +5,16 @@
 .aaplimg.com
 .gstatic.com
 .akamaiedge.net
-.ntp.org
 .akamai.net
-.cloudflare.com
+.ntp.org
 .bing.com
+.cloudflare.com
 .office.com
 .lencr.org
-.facebook.com
 .digicert.com
 .cloudflare-dns.com
+.facebook.com
+.live.com
 .amazonaws.com
 .whatsapp.net
 .googlevideo.com
@@ -21,7 +22,6 @@
 .fastly.net
 .instagram.com
 .cloudfront.net
-.live.com
 .fbcdn.net
 .googleusercontent.com
 .azure.com
