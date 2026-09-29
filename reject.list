@@ -29,6 +29,7 @@
 .mobads.baidu.com
 .pos.baidu.com
 .h2tcbox.baidu.com
+.tdum.alibaba.com
 .snowflake.qq.com
 .mllog.jd.com
 .fxgate.baidu.com
@@ -36,6 +37,7 @@
 .th.pinduoduo.com
 .inf.miui.com
 .fourier.taobao.com
+.fourier.alibaba.com
 .apmplus.ap-southeast-1.volces.com
 .cpu.baidu.com
 .msite.baidu.com
@@ -59,7 +61,9 @@
 .beacon.cdn.qq.com
 .bzclk.baidu.com
 .cfg.imtt.qq.com
+.cmap.alibaba.com
 .conf.international.baidu.com
+.dmtracking2.alibaba.com
 .eclick.baidu.com
 .fclog.baidu.com
 .hm.baidu.com
@@ -68,6 +72,8 @@
 .pb.i.sogou.com
 .pingback.sogou.com
 .sfp.safe.baidu.com
+.stat.alibaba.com
+.tracelog.www.alibaba.com
 .sp1.baidu.com
 .sp2.baidu.com
 .sp3.baidu.com
@@ -121,6 +127,8 @@
 .edith-seb.xiaohongshu.com
 .adashx4id.ut.taobao.com
 .ulog-sdk.gifshow.com
+.adashx.ut.alibaba.com
+.h-adashx.ut.alibaba.com
 .spider-tracker.xiaohongshu.com
 .tp2p.kg.qq.com
 .twns.p2ptun.qq.com
@@ -252,6 +260,7 @@
 .stat.youpin.mi.com
 .tce.alicdn.com
 .web-trace.ksapisrv.com
+.aplus.alibaba.com
 .catfront.dianping.com
 .galileotelemetry.tencent.com
 .gsp1.baidu.com
