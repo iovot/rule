@@ -1,14 +1,17 @@
+.res.oa.opera.com
 .impdsp.meituan.com
 .rtb.julang.taobao.com
 .omes-sec.heytapmobi.com
 .xpjcg.oss-accelerate.aliyuncs.com
 .cpro.baidu.com
+.s-adx.op-mobile.opera.com
 .usp1.baidu.com
 .plugin.mobopay.baidu.com
 .ads.heytapmobi.com
 .h-adashx.ut.taobao.com
 .p3-ad-sign.byteimg.com
 .wcp.taobao.com
+.dl-adx.op-mobile.opera.com
 .httpdns.bilivideo.com
 .frontier100-toutiao-lf.fqnovel.com
 .projecta-common-1258344701.file.myqcloud.com
@@ -125,6 +128,7 @@
 .apm-fe.xiaohongshu.com
 .apm-track.xiaohongshu.com
 .edith-seb.xiaohongshu.com
+.t-odx.op-mobile.opera.com
 .adashx4id.ut.taobao.com
 .ulog-sdk.gifshow.com
 .adashx.ut.alibaba.com
@@ -164,6 +168,7 @@
 .amdc.m.taobao.com
 .amdcopen.m.taobao.com
 .log.tpns.tencent.com
+.pps-log.op-mobile.opera.com
 .android.bugly.qq.com
 .astat.bugly.qq.com
 .ios.bugly.qq.com
@@ -208,6 +213,8 @@
 .tpstelemetry.tencent.com
 .data.hicloud.com
 .hubble.netease.com
+.try.opera.com
+.adx.opera.com
 .ad.intl.xiaomi.com
 .ad.xiaomi.com
 .aixuntupian.oss-cn-hongkong.aliyuncs.com
@@ -251,8 +258,10 @@
 .wzjs1.oss-accelerate.aliyuncs.com
 .analytics.meituan.net
 .beaconcdn.qq.com
+.browsertdidticket.m.qq.com
 .da.netease.com
 .datacollector-dra.dt.hicloud.com
+.gatherer.m.qq.com
 .opt.doubao.com
 .oss.weread.qq.com
 .pr.nss.netease.com
